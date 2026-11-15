@@ -213,6 +213,10 @@ const OPPOSING_KANJI_PAIRS = let
         ('完', '不'), ('既', '未'), ('永', '瞬'), ('古', '今'), ('昔', '今'),
         ('東', '西'), ('南', '北'), ('縦', '横'), ('表', '内'), ('本', '末'),
         ('源', '末'), ('先', '後'), ('初', '終'), ('首', '尾'), ('頭', '尾'),
+        ('熱', '冷'), ('寒', '暖'), ('寒', '温'), ('涼', '暖'), ('涼', '暑'),
+        ('始', '了'), ('開', '終'), ('成', '敗'), ('成', '失'), ('攻', '防'),
+        ('美', '醜'), ('賢', '愚'), ('苦', '楽'), ('寛', '厳'), ('清', '濁'),
+        ('乾', '濡'), ('干', '満'), ('賛', '否'), ('濃', '薄'),
     ]
     s = Set{Tuple{Char, Char}}()
     for (a, b) in raw_pairs
@@ -223,6 +227,74 @@ const OPPOSING_KANJI_PAIRS = let
 end
 
 @inline is_kanji(c::Char) = ('\u4e00' <= c <= '\u9fff') || ('\u3400' <= c <= '\u4dbf') || ('\uf900' <= c <= '\ufaff')
+@inline has_katakana(w::AbstractString) = any(c -> ('\u30a1' <= c <= '\u30fc'), w)
+
+"""
+    word_shape_class(w::AbstractString) -> Symbol
+
+Classify the surface morphological shape of a Japanese word into one of
+`:katakana`, `:single_kanji`, `:kanji_compound`, `:i_adj`, `:kanji_okuri`, or `:hiragana`.
+"""
+function word_shape_class(w::AbstractString)::Symbol
+    s = Unicode.normalize(String(w), :NFKC)
+    isempty(s) && return :other
+    has_katakana(s) && return :katakana
+    chars = collect(s)
+    if all(c -> is_kanji(c) || c == '々', chars)
+        return length(chars) == 1 ? :single_kanji : :kanji_compound
+    elseif is_kanji(chars[1]) && chars[end] == 'い'
+        return :i_adj
+    elseif any(is_kanji, chars)
+        return :kanji_okuri
+    else
+        return :hiragana
+    end
+end
+
+"""
+    has_opposing_kanji(w1::AbstractString, w2::AbstractString; require_same_shape::Bool = false) -> Bool
+
+Return `true` if `w1` and `w2` contain an opposing Kanji pair from `OPPOSING_KANJI_PAIRS`.
+"""
+function has_opposing_kanji(w1::AbstractString, w2::AbstractString; require_same_shape::Bool = false)::Bool
+    if require_same_shape && word_shape_class(w1) != word_shape_class(w2)
+        return false
+    end
+    for a in w1
+        is_kanji(a) || continue
+        for b in w2
+            is_kanji(b) || continue
+            if a != b && (a, b) in OPPOSING_KANJI_PAIRS
+                return true
+            end
+        end
+    end
+    return false
+end
+
+"""
+    is_negation_pair(w1::AbstractString, w2::AbstractString) -> Bool
+
+Return `true` if one word is formed by prepending a negation prefix in `NEGATION_PREFIXES` to the other.
+"""
+function is_negation_pair(w1::AbstractString, w2::AbstractString)::Bool
+    s1 = Unicode.normalize(String(w1), :NFKC)
+    s2 = Unicode.normalize(String(w2), :NFKC)
+    for p in NEGATION_PREFIXES
+        if s2 == p * s1 || s1 == p * s2
+            return true
+        end
+    end
+    return false
+end
+
+"""
+    is_structural_antonym_pair(w1::AbstractString, w2::AbstractString) -> Bool
+
+Return `true` if `(w1, w2)` is either a negation-prefix pair or a same-shape opposing-Kanji pair.
+"""
+is_structural_antonym_pair(w1::AbstractString, w2::AbstractString)::Bool =
+    has_opposing_kanji(w1, w2; require_same_shape = true) || is_negation_pair(w1, w2)
 
 """
     extract_pair_surface_features(w1::AbstractString, w2::AbstractString) -> Vector{Float32}
@@ -235,7 +307,7 @@ Extract 8 surface/morphological features for a Japanese word pair `(w1, w2)`:
 5. Opposing Kanji pair presence indicator
 6. Shared final character indicator (e.g. matching okurigana/suffix)
 7. Full character Jaccard similarity
-8. Shared initial character indicator (when words differ)
+8. Word shape class compatibility indicator (`word_shape_class(w1) == word_shape_class(w2)` or exact negation prefix)
 """
 function extract_pair_surface_features(w1::AbstractString, w2::AbstractString)
     s1 = Unicode.normalize(String(w1), :NFKC)
@@ -279,7 +351,7 @@ function extract_pair_surface_features(w1::AbstractString, w2::AbstractString)
     u_len = length(union(set1, set2))
     char_jaccard = u_len > 0 ? Float32(length(intersect(set1, set2)) / u_len) : 0.0f0
 
-    shared_prefix = (l1 >= 1 && l2 >= 1 && c1[1] == c2[1] && s1 != s2) ? 1.0f0 : 0.0f0
+    shape_compat = (word_shape_class(s1) == word_shape_class(s2) || neg_asym == 1.0f0) ? 1.0f0 : 0.0f0
 
     return Float32[
         len_diff,
@@ -289,7 +361,7 @@ function extract_pair_surface_features(w1::AbstractString, w2::AbstractString)
         opposing_kanji,
         shared_suffix,
         char_jaccard,
-        shared_prefix,
+        shape_compat,
     ]
 end
 

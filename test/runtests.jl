@@ -155,6 +155,19 @@ end
             f_adj = extract_pair_surface_features("高い", "低い")
             @test f_adj[5] == 1.0f0 # Opposing Kanji (高 / 低)
             @test f_adj[6] == 1.0f0 # Shared suffix い
+            @test f_adj[8] == 1.0f0 # Compatible word shape class (:i_adj)
+
+            f_hot = extract_pair_surface_features("熱い", "冷たい")
+            @test f_hot[5] == 1.0f0 # Opposing Kanji (熱 / 冷)
+            @test f_hot[8] == 1.0f0 # Compatible word shape class (:i_adj)
+
+            f_mismatch = extract_pair_surface_features("熱い", "クール")
+            @test f_mismatch[8] == 0.0f0 # Mismatched shape (:i_adj vs :katakana)
+            @test word_shape_class("熱い") == :i_adj
+            @test word_shape_class("クール") == :katakana
+            @test word_shape_class("増加") == :kanji_compound
+            @test has_opposing_kanji("熱い", "冷たい"; require_same_shape = true)
+            @test !is_structural_antonym_pair("熱い", "クール")
         end
     end
 

@@ -79,11 +79,13 @@ end
         syn_probs::AbstractVector{<:Real},
         reading_map::AbstractDict{String, String};
         stage1_scores::AbstractVector{<:Real} = zeros(Float32, length(candidates)),
+        rank_scores::AbstractVector{<:Real} = scores,
         top_n::Int = 10,
     )
 
 Filter self-matches and reading-identical orthographic variants of `query_word`, deduplicate
-candidates sharing the same normalized reading, and return the top `top_n` candidates.
+candidates sharing the same normalized reading, and return the top `top_n` candidates ordered
+by `rank_scores` (defaulting to `scores`).
 """
 function postprocess_candidates(
     query_word::AbstractString,
@@ -92,16 +94,17 @@ function postprocess_candidates(
     syn_probs::AbstractVector{<:Real},
     reading_map::AbstractDict{String, String};
     stage1_scores::AbstractVector{<:Real} = zeros(Float32, length(candidates)),
+    rank_scores::AbstractVector{<:Real} = scores,
     top_n::Int = 10,
 )
     n = length(candidates)
-    length(scores) == n && length(syn_probs) == n && length(stage1_scores) == n ||
+    length(scores) == n && length(syn_probs) == n && length(stage1_scores) == n && length(rank_scores) == n ||
         error("Candidate and score vector lengths must match.")
 
     q_norm = Unicode.normalize(String(query_word), :NFKC)
     q_reading = _lookup_reading(reading_map, q_norm)
 
-    order = sortperm(scores; rev = true)
+    order = sortperm(rank_scores; rev = true)
     seen_words = Set{String}([q_norm])
     seen_readings = Set{String}([q_reading])
 
@@ -197,6 +200,7 @@ function generate_antonyms(
 
     ant_probs = Vector{Float32}(undef, n_cands)
     syn_probs = Vector{Float32}(undef, n_cands)
+    all_surf = Matrix{Float32}(undef, 8, n_cands)
     q_str = String(word)
 
     for start_idx in 1:batch_size:n_cands
@@ -207,6 +211,7 @@ function generate_antonyms(
 
         ids, tids, mask = encode_batch_pair(pipeline.tokenizer, w1s, w2s; max_len = max_len_pair, dynamic_pad = true)
         surf = extract_batch_surface_features(w1s, w2s)
+        all_surf[:, start_idx:end_idx] = surf
         s1_feats = vcat(reshape(s_qk[start_idx:end_idx], 1, m), reshape(s_kk[start_idx:end_idx], 1, m))
         pair_feats = vcat(surf, s1_feats)
 
@@ -221,6 +226,21 @@ function generate_antonyms(
         ant_probs[start_idx:end_idx] = vec(probs[3, :])
     end
 
+    # Combine calibrated Cross-Encoder antonym score with Stage 1 retrieval similarity and structural/shape cues
+    rank_scores = Vector{Float32}(undef, n_cands)
+    @inbounds for i in 1:n_cands
+        ant_p = ant_probs[i]
+        syn_p = syn_probs[i]
+        s1 = max(s_qk[i], 0.0f0)
+        struct_bonus = max(all_surf[5, i], all_surf[4, i])
+        shape_bonus = all_surf[8, i]
+        concise_bonus = 1.0f0 - all_surf[1, i]
+        gate = clamp((ant_p - 0.25f0) / 0.50f0, 0.0f0, 1.0f0)
+        rank_scores[i] = (ant_p - 0.35f0 * syn_p) +
+            0.25f0 * s1 +
+            gate * (0.12f0 * struct_bonus + 0.06f0 * shape_bonus + 0.04f0 * concise_bonus)
+    end
+
     return postprocess_candidates(
         q_str,
         cands,
@@ -228,6 +248,7 @@ function generate_antonyms(
         syn_probs,
         pipeline.reading_map;
         stage1_scores = s_qk,
+        rank_scores = rank_scores,
         top_n = top_n,
     )
 end

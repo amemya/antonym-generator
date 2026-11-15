@@ -3,6 +3,7 @@ module AntonymGenerator
 export DeviceConfig, resolve_device, to_device, cpu_device, reclaim_device_memory!
 export CharBertTokenizer, load_vocab, encode_single, encode_batch_single, encode_batch_pair
 export extract_pair_surface_features, extract_batch_surface_features
+export word_shape_class, has_opposing_kanji, is_negation_pair, is_structural_antonym_pair
 export BertConfig, BertEmbeddings, BertSelfAttention, BertLayer, BertBackbone
 export load_safetensors, load_pretrained_bert, mean_pool, char_embedding_pool
 export BiEncoder, CrossEncoder, encode_query, encode_candidate, encode_query_and_candidate

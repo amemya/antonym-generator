@@ -65,14 +65,50 @@ function _ensure_raw_datasets(raw_dir::AbstractString)
     return xml_path, sudachi_path
 end
 
-function _parse_wnja_xml(xml_path::AbstractString; max_lemmas_per_synset::Int = 6)
+function _parse_wnja_xml_detailed(xml_path::AbstractString)
+    re_wf = r"writtenForm=\"([^\"]+)\""
+    re_syn = r"synset=\"([^\"]+)\""
+    re_cnt = r">(\d+)</Count>"
+    re_id = r"id=\"([^\"]+)\""
+    re_tgt = r"target=\"([^\"]+)\""
+
+    # Pass 1: collect candidate clean words and count occurrences in definitions/examples
+    corpus_freq = Dict{String, Int}()
+    def_lines = String[]
+    for line in eachline(xml_path)
+        if occursin("<Lemma ", line) || (occursin("<Form ", line) && !occursin("script=", line))
+            m = match(re_wf, line)
+            if m !== nothing
+                w = Unicode.normalize(String(m.captures[1]), :NFKC)
+                is_clean_ja_word(w) && (corpus_freq[w] = 0)
+            end
+        elseif occursin("<Definition>", line) || occursin("<Example>", line)
+            push!(def_lines, line)
+        end
+    end
+    for line in def_lines
+        chars = collect(line)
+        n = length(chars)
+        @inbounds for i in 1:n
+            c1 = chars[i]
+            (c1 == '<' || c1 == '>' || isspace(c1)) && continue
+            for j in i:min(n, i + 9)
+                w = String(@view chars[i:j])
+                haskey(corpus_freq, w) && (corpus_freq[w] += 1)
+            end
+        end
+    end
+
+    # Pass 2: parse entries including canonical <Form> orthographic variants and JSemCor counts
     synset_raw = Dict{String, Vector{Tuple{String, Int}}}()
     antonym_links = Tuple{String, String}[]
     reading_map = Dict{String, Set{String}}()
     all_words = Set{String}()
+    word_max_count = Dict{String, Int}()
 
-    cur_lemma = ""
-    cur_clean = false
+    cur_forms = String[]
+    cur_hira = String[]
+    forms_finalized = false
     cur_synset_id = ""
     in_sense = false
     sense_synset = ""
@@ -80,35 +116,50 @@ function _parse_wnja_xml(xml_path::AbstractString; max_lemmas_per_synset::Int = 
 
     for line in eachline(xml_path)
         if occursin("<LexicalEntry ", line)
-            cur_lemma = ""
-            cur_clean = false
-        elseif occursin("<Lemma ", line)
-            m = match(r"writtenForm=\"([^\"]+)\"", line)
+            empty!(cur_forms)
+            empty!(cur_hira)
+            forms_finalized = false
+            in_sense = false
+        elseif occursin("<Lemma ", line) || (occursin("<Form ", line) && !occursin("script=", line))
+            m = match(re_wf, line)
             if m !== nothing
                 w = Unicode.normalize(String(m.captures[1]), :NFKC)
-                if is_clean_ja_word(w)
-                    cur_lemma = w
-                    cur_clean = true
-                    push!(all_words, w)
-                else
-                    cur_lemma = ""
-                    cur_clean = false
+                if is_clean_ja_word(w) && !(w in cur_forms)
+                    push!(cur_forms, w)
                 end
             end
-        elseif cur_clean && occursin("<Form ", line) && occursin("script=\"hira\"", line)
-            m = match(r"writtenForm=\"([^\"]+)\"", line)
+        elseif !isempty(cur_forms) && occursin("<Form ", line) && occursin("script=\"hira\"", line)
+            m = match(re_wf, line)
             if m !== nothing
                 hira = to_hiragana(m.captures[1])
-                if !isempty(hira)
-                    push!(get!(reading_map, cur_lemma, Set{String}()), hira)
-                end
+                !isempty(hira) && !(hira in cur_hira) && push!(cur_hira, hira)
             end
-        elseif cur_clean && occursin("<Sense ", line)
-            m = match(r"synset=\"([^\"]+)\"", line)
+        elseif !isempty(cur_forms) && occursin("<Sense ", line)
+            if !forms_finalized
+                sorted_f = sort(cur_forms; by = w -> (-get(corpus_freq, w, 0), length(w), w))
+                kept_f = String[sorted_f[1]]
+                best_cf = get(corpus_freq, sorted_f[1], 0)
+                for k in 2:length(sorted_f)
+                    cf = get(corpus_freq, sorted_f[k], 0)
+                    if cf >= 10 && cf >= 0.2 * best_cf
+                        push!(kept_f, sorted_f[k])
+                    end
+                end
+                for w in cur_forms
+                    push!(all_words, w)
+                    !isempty(cur_hira) && union!(get!(reading_map, w, Set{String}()), cur_hira)
+                end
+                cur_forms = kept_f
+                forms_finalized = true
+            end
+            m = match(re_syn, line)
             if m !== nothing
                 s = String(m.captures[1])
-                if endswith(line, "/>") || occursin("/>", line)
-                    push!(get!(synset_raw, s, Tuple{String, Int}[]), (cur_lemma, 0))
+                if occursin("/>", line)
+                    for w in cur_forms
+                        push!(get!(synset_raw, s, Tuple{String, Int}[]), (w, 0))
+                        word_max_count[w] = max(get(word_max_count, w, 0), 0)
+                    end
                     in_sense = false
                 else
                     in_sense = true
@@ -117,45 +168,158 @@ function _parse_wnja_xml(xml_path::AbstractString; max_lemmas_per_synset::Int = 
                 end
             end
         elseif in_sense && occursin("<Count ", line)
-            m = match(r">(\d+)</Count>", line)
-            if m !== nothing
-                sense_count += parse(Int, m.captures[1])
-            end
+            m = match(re_cnt, line)
+            m !== nothing && (sense_count += parse(Int, m.captures[1]))
         elseif in_sense && occursin("</Sense>", line)
-            push!(get!(synset_raw, sense_synset, Tuple{String, Int}[]), (cur_lemma, sense_count))
+            for w in cur_forms
+                push!(get!(synset_raw, sense_synset, Tuple{String, Int}[]), (w, sense_count))
+                word_max_count[w] = max(get(word_max_count, w, 0), sense_count)
+            end
+            in_sense = false
+        elseif occursin("</LexicalEntry>", line)
+            if !forms_finalized && !isempty(cur_forms)
+                for w in cur_forms
+                    push!(all_words, w)
+                    !isempty(cur_hira) && union!(get!(reading_map, w, Set{String}()), cur_hira)
+                end
+            end
             in_sense = false
         elseif occursin("<Synset ", line)
-            m = match(r"id=\"([^\"]+)\"", line)
+            m = match(re_id, line)
             cur_synset_id = m !== nothing ? String(m.captures[1]) : ""
         elseif !isempty(cur_synset_id) && occursin("relType=\"antonym\"", line)
-            m = match(r"target=\"([^\"]+)\"", line)
-            if m !== nothing
-                push!(antonym_links, (cur_synset_id, String(m.captures[1])))
-            end
+            m = match(re_tgt, line)
+            m !== nothing && push!(antonym_links, (cur_synset_id, String(m.captures[1])))
         elseif occursin("</Synset>", line)
             cur_synset_id = ""
         end
     end
 
-    # Keep up to `max_lemmas_per_synset` canonical lemmas per synset prioritized by JSemCor frequency and shorter length
-    synset_words = Dict{String, Vector{String}}()
-    sizehint!(synset_words, length(synset_raw))
+    synset_clean = Dict{String, Vector{Tuple{String, Int}}}()
+    sizehint!(synset_clean, length(synset_raw))
     for (sid, entries) in synset_raw
         best_by_word = Dict{String, Int}()
         for (w, cnt) in entries
             best_by_word[w] = max(get(best_by_word, w, 0), cnt)
         end
-        sorted = sort(collect(best_by_word); by = kv -> (-kv[2], length(kv[1]), kv[1]))
+        synset_clean[sid] = Tuple{String, Int}[(w, cnt) for (w, cnt) in best_by_word]
+    end
+
+    return synset_clean, antonym_links, reading_map, all_words, word_max_count, corpus_freq
+end
+
+function _top_synset_words(
+    synset_clean::Dict{String, Vector{Tuple{String, Int}}},
+    corpus_freq::Dict{String, Int};
+    max_lemmas_per_synset::Int = 6,
+)
+    synset_words = Dict{String, Vector{String}}()
+    sizehint!(synset_words, length(synset_clean))
+    for (sid, entries) in synset_clean
+        sorted = sort(entries; by = kv -> (-kv[2], -get(corpus_freq, kv[1], 0), length(kv[1]), kv[1]))
         n_keep = min(length(sorted), max_lemmas_per_synset)
         synset_words[sid] = String[sorted[i][1] for i in 1:n_keep]
     end
+    return synset_words
+end
 
+function _parse_wnja_xml(xml_path::AbstractString; max_lemmas_per_synset::Int = 6)
+    synset_clean, antonym_links, reading_map, all_words, _, corpus_freq = _parse_wnja_xml_detailed(xml_path)
+    synset_words = _top_synset_words(synset_clean, corpus_freq; max_lemmas_per_synset = max_lemmas_per_synset)
     return synset_words, antonym_links, reading_map, all_words
 end
 
+function _prune_wnja_synset_side(
+    e1::Vector{Tuple{String, Int}},
+    e2::Vector{Tuple{String, Int}},
+    word_max_count::Dict{String, Int},
+    corpus_freq::Dict{String, Int},
+)
+    isempty(e1) && return String[]
+    needs_struct_rescue(w, c) = c == 0 &&
+        (get(corpus_freq, w, 0) >= 1 || length(e1) == 1) &&
+        any(is_structural_antonym_pair(w, w2) for (w2, _) in e2)
+
+    filtered = filter(e1) do (w, c)
+        c > 0 && return true
+        length(e1) == 1 && return true
+        needs_struct_rescue(w, c) && return true
+        return get(word_max_count, w, 0) < 2 && get(corpus_freq, w, 0) > 0
+    end
+    if isempty(filtered)
+        min_mc = minimum(get(word_max_count, x[1], 0) for x in e1)
+        filtered = filter(x -> get(word_max_count, x[1], 0) == min_mc, e1)
+    end
+
+    has_pos = any(x -> x[2] > 0, filtered)
+    if has_pos
+        filtered = filter(x -> x[2] > 0 || needs_struct_rescue(x[1], x[2]), filtered)
+    else
+        max_cf = maximum(get(corpus_freq, x[1], 0) for x in filtered)
+        if max_cf >= 15
+            filtered = filter(x -> get(corpus_freq, x[1], 0) >= max(5, div(max_cf, 5)) || needs_struct_rescue(x[1], x[2]), filtered)
+        end
+    end
+
+    sorted = sort(filtered; by = x -> (
+        -(any(is_structural_antonym_pair(x[1], w2) for (w2, _) in e2) ? 1 : 0),
+        has_katakana(x[1]) ? 1 : 0,
+        -(10 * x[2] + min(get(corpus_freq, x[1], 0), 50)),
+        -get(corpus_freq, x[1], 0),
+        length(x[1]),
+        x[1],
+    ))
+    has_struct = any(any(is_structural_antonym_pair(x[1], w2) for (w2, _) in e2) for x in sorted)
+    cap = has_struct ? 4 : (has_pos ? 3 : 2)
+    return String[sorted[i][1] for i in 1:min(length(sorted), cap)]
+end
+
+function _build_wnja_antonym_pairs(
+    synset_clean::Dict{String, Vector{Tuple{String, Int}}},
+    antonym_links::Vector{Tuple{String, String}},
+    word_max_count::Dict{String, Int},
+    corpus_freq::Dict{String, Int},
+    synonym_pairs::Set{Tuple{String, String}},
+)
+    antonym_pairs = Set{Tuple{String, String}}()
+    empty_entries = Tuple{String, Int}[]
+    for (s1, s2) in antonym_links
+        e1 = get(synset_clean, s1, empty_entries)
+        e2 = get(synset_clean, s2, empty_entries)
+        w1s = _prune_wnja_synset_side(e1, e2, word_max_count, corpus_freq)
+        w2s = _prune_wnja_synset_side(e2, e1, word_max_count, corpus_freq)
+        (isempty(w1s) || isempty(w2s)) && continue
+
+        for w1 in w1s, w2 in w2s
+            w1 == w2 && continue
+            (w1, w2) in synonym_pairs && continue
+
+            w1_has_struct = any(is_structural_antonym_pair(w1, y) for y in w2s)
+            w2_has_struct = any(is_structural_antonym_pair(x, w2) for x in w1s)
+            if (w1_has_struct || w2_has_struct) && !is_structural_antonym_pair(w1, w2)
+                continue
+            end
+
+            if !is_structural_antonym_pair(w1, w2)
+                w1_shape = word_shape_class(w1)
+                w2_shape = word_shape_class(w2)
+                w1_has_shape = any(w1_shape == word_shape_class(y) for y in w2s)
+                w2_has_shape = any(word_shape_class(x) == w2_shape for x in w1s)
+                if (w1_has_shape || w2_has_shape) && w1_shape != w2_shape
+                    continue
+                end
+            end
+
+            push!(antonym_pairs, (w1, w2))
+            push!(antonym_pairs, (w2, w1))
+        end
+    end
+    return antonym_pairs
+end
+
 function _parse_sudachi_synonyms(sudachi_path::AbstractString; max_partners_per_word::Int = 5)
-    # group_id -> lexeme_id -> Vector{String}
-    groups = Dict{String, Dict{String, Vector{String}}}()
+    # group_id -> lexeme_id -> Vector{Tuple{String, Bool}} (word, is_standard_headword)
+    groups = Dict{String, Dict{String, Vector{Tuple{String, Bool}}}}()
     all_words = Set{String}()
 
     for raw_line in eachline(sudachi_path)
@@ -168,25 +332,27 @@ function _parse_sudachi_synonyms(sudachi_path::AbstractString; max_partners_per_
         exp_flag = String(parts[3])
         exp_flag == "2" && continue  # Deprecated / do not expand
         lex_id = String(parts[4])
+        is_std = (String(parts[5]) == "0" && String(parts[7]) == "0")
         word = Unicode.normalize(String(parts[9]), :NFKC)
         is_clean_ja_word(word) || continue
 
         push!(all_words, word)
-        g = get!(groups, group_id, Dict{String, Vector{String}}())
-        push!(get!(g, lex_id, String[]), word)
+        g = get!(groups, group_id, Dict{String, Vector{Tuple{String, Bool}}}())
+        push!(get!(g, lex_id, Tuple{String, Bool}[]), (word, is_std))
     end
 
     synonym_pairs = Set{Tuple{String, String}}()
     variant_clusters = Dict{String, Set{String}}()
 
     for (_, lex_map) in groups
-        # Identical (group_id, lexeme_id) are orthographic/reading variants
-        for (_, variants) in lex_map
-            length(variants) >= 2 || continue
-            # Prefer a shortest hiragana/kana form as canonical variant cluster token
-            canon = sort(variants; by = v -> (length(v), v))[1]
+        # Identical (group_id, lexeme_id) are orthographic/reading variants; only use pure kana forms as readings
+        for (_, variant_entries) in lex_map
+            length(variant_entries) >= 2 || continue
+            kana_variants = String[w for (w, _) in variant_entries if all(c -> !is_kanji(c), w)]
+            isempty(kana_variants) && continue
+            canon = sort(kana_variants; by = v -> (length(v), v))[1]
             canon_hira = to_hiragana(canon)
-            for v in variants
+            for (v, _) in variant_entries
                 push!(get!(variant_clusters, v, Set{String}()), canon_hira)
             end
         end
@@ -195,9 +361,10 @@ function _parse_sudachi_synonyms(sudachi_path::AbstractString; max_partners_per_
         length(lex_ids) >= 2 || continue
         reps = String[]
         for lid in lex_ids
-            # Representative word per lexeme
+            # Prioritize standard headword (parts[5] == "0" && parts[7] == "0") per lexeme
             cands = lex_map[lid]
-            push!(reps, cands[1])
+            std_idx = findfirst(x -> x[2], cands)
+            push!(reps, std_idx === nothing ? cands[1][1] : cands[std_idx][1])
         end
         n_rep = length(reps)
         for i in 1:n_rep
@@ -428,10 +595,40 @@ function build_disjoint_splits(
     val_pool = isempty(val_ant_words) ? train_pool : sort(collect(val_ant_words))
     test_pool = isempty(test_ant_words) ? train_pool : sort(collect(test_ant_words))
 
-    function sample_unrelated(queries::Vector{String}, pool::Vector{String}, target_n::Int)
+    function sample_unrelated(
+        queries::Vector{String},
+        pool::Vector{String},
+        target_n::Int;
+        ant_pairs::Vector{Tuple{String, String}} = Tuple{String, String}[],
+    )
         out = Tuple{String, String}[]
-        isempty(queries) || isempty(pool) && return out
+        (isempty(queries) || isempty(pool)) && return out
         seen = Set{Tuple{String, String}}()
+
+        # First guarantee balanced query-side and candidate-side Unrelated negatives for every antonym pair
+        for (a, b) in ant_pairs
+            for _ in 1:20
+                rand_b = pool[rand(rng, 1:length(pool))]
+                rand_b == a && continue
+                pair_q = (a, rand_b)
+                if !(pair_q in known_rel || pair_q in seen)
+                    push!(seen, pair_q)
+                    push!(out, pair_q)
+                    break
+                end
+            end
+            for _ in 1:20
+                rand_a = queries[rand(rng, 1:length(queries))]
+                rand_a == b && continue
+                pair_k = (rand_a, b)
+                if !(pair_k in known_rel || pair_k in seen)
+                    push!(seen, pair_k)
+                    push!(out, pair_k)
+                    break
+                end
+            end
+        end
+
         attempts = 0
         max_attempts = max(target_n * 20, 2000)
         while length(out) < target_n && attempts < max_attempts
@@ -448,9 +645,24 @@ function build_disjoint_splits(
     end
 
     split_unrel = Dict(
-        "train" => sample_unrelated(isempty(train_ant_words) ? train_pool : sort(collect(train_ant_words)), train_pool, max(length(split_ant["train"]) * 2, 100)),
-        "val" => sample_unrelated(val_pool, [w for w in vocab_list if !(w in train_ant_words) && !(w in test_ant_words)], max(length(split_ant["val"]) * 2, 20)),
-        "test" => sample_unrelated(test_pool, [w for w in vocab_list if !(w in train_ant_words) && !(w in val_ant_words)], max(length(split_ant["test"]) * 2, 20)),
+        "train" => sample_unrelated(
+            isempty(train_ant_words) ? train_pool : sort(collect(train_ant_words)),
+            train_pool,
+            max(length(split_ant["train"]) * 2, 100);
+            ant_pairs = split_ant["train"],
+        ),
+        "val" => sample_unrelated(
+            val_pool,
+            [w for w in vocab_list if !(w in train_ant_words) && !(w in test_ant_words)],
+            max(length(split_ant["val"]) * 2, 20);
+            ant_pairs = split_ant["val"],
+        ),
+        "test" => sample_unrelated(
+            test_pool,
+            [w for w in vocab_list if !(w in train_ant_words) && !(w in val_ant_words)],
+            max(length(split_ant["test"]) * 2, 20);
+            ant_pairs = split_ant["test"],
+        ),
     )
 
     function to_df(sp::String)
@@ -474,11 +686,47 @@ function build_disjoint_splits(
     val_df = to_df("val")
     test_df = to_df("test")
 
+    clean_reading_map = Dict{String, String}()
+    for (w, rset) in reading_map
+        isempty(rset) && continue
+        kana_r = String[r for r in rset if !any(is_kanji, r)]
+        if !isempty(kana_r)
+            clean_reading_map[w] = first(sort(kana_r))
+        else
+            clean_reading_map[w] = first(sort(collect(rset)))
+        end
+    end
+
+    neg_kana_prefixes = (("不", "ふ"), ("非", "ひ"), ("無", "む"), ("未", "み"))
     readings_col = String[]
     splits_col = String[]
     for w in vocab_list
-        rset = get(reading_map, w, Set{String}())
-        r = isempty(rset) ? to_hiragana(w) : first(sort(collect(rset)))
+        r = if haskey(clean_reading_map, w)
+            clean_reading_map[w]
+        else
+            inferred = ""
+            if length(w) >= 2
+                for (pref, pkana) in neg_kana_prefixes
+                    if startswith(w, pref)
+                        base = String(w[nextind(w, 1):end])
+                        if haskey(clean_reading_map, base)
+                            inferred = pkana * clean_reading_map[base]
+                            break
+                        end
+                    end
+                end
+                if isempty(inferred)
+                    c_end = last(w)
+                    if '\u3041' <= c_end <= '\u3096'
+                        stem = String(w[1:prevind(w, lastindex(w))])
+                        if haskey(clean_reading_map, stem)
+                            inferred = clean_reading_map[stem] * string(c_end)
+                        end
+                    end
+                end
+            end
+            isempty(inferred) ? to_hiragana(w) : inferred
+        end
         push!(readings_col, r)
         push!(splits_col, word_split[w])
     end
@@ -512,7 +760,8 @@ function download_and_build_dataset(; raw_dir::AbstractString = "data/raw", out_
     mkpath(out_dir)
 
     @info "Parsing Japanese WordNet XML..." path=xml_path
-    synset_words, antonym_links, reading_map, wn_words = _parse_wnja_xml(xml_path)
+    synset_clean, antonym_links, reading_map, wn_words, word_max_count, corpus_freq = _parse_wnja_xml_detailed(xml_path)
+    synset_words = _top_synset_words(synset_clean, corpus_freq; max_lemmas_per_synset = 6)
 
     @info "Parsing Sudachi Synonym Dictionary..." path=sudachi_path
     sudachi_syn_pairs, variant_clusters, sudachi_words = _parse_sudachi_synonyms(sudachi_path)
@@ -536,18 +785,14 @@ function download_and_build_dataset(; raw_dir::AbstractString = "data/raw", out_
         end
     end
 
-    # Build WordNet antonym pairs
-    antonym_pairs = Set{Tuple{String, String}}()
-    for (s1, s2) in antonym_links
-        w1s = get(synset_words, s1, String[])
-        w2s = get(synset_words, s2, String[])
-        for w1 in w1s, w2 in w2s
-            w1 == w2 && continue
-            (w1, w2) in synonym_pairs && continue
-            push!(antonym_pairs, (w1, w2))
-            push!(antonym_pairs, (w2, w1))
-        end
-    end
+    # Build pruned & shape/structure-aligned WordNet antonym pairs
+    antonym_pairs = _build_wnja_antonym_pairs(
+        synset_clean,
+        antonym_links,
+        word_max_count,
+        corpus_freq,
+        synonym_pairs,
+    )
 
     # Add morphological negation antonym pairs when both base (>= 2 chars) and prefix*base exist in vocab
     for w in all_vocab_set
