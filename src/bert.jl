@@ -3,6 +3,7 @@ using Flux
 using JSON3
 using NNlib
 using Statistics
+using Zygote
 
 """
     BertConfig
@@ -188,9 +189,11 @@ function char_embedding_pool(
 )
     raw_emb = bb.embeddings.word_embeddings(token_ids)
     cfg = bb.config
-    char_mask = Float32.((token_ids .!= cfg.pad_token_id) .& (token_ids .!= cfg.cls_token_id) .& (token_ids .!= cfg.sep_token_id))
-    has_chars = sum(char_mask; dims = 1) .> 0.5f0
-    eff_mask = ifelse.(has_chars, char_mask, pad_mask)
+    eff_mask = Zygote.ChainRulesCore.ignore_derivatives() do
+        char_mask = Float32.((token_ids .!= cfg.pad_token_id) .& (token_ids .!= cfg.cls_token_id) .& (token_ids .!= cfg.sep_token_id))
+        has_chars = sum(char_mask; dims = 1) .> 0.5f0
+        return ifelse.(has_chars, char_mask, pad_mask)
+    end
     return mean_pool(raw_emb, eff_mask)
 end
 

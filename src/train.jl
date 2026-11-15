@@ -233,6 +233,10 @@ function train_bi_encoder!(
 
     Flux.loadmodel!(model, best_state)
     Flux.testmode!(model)
+    best_state = nothing
+    opt_state = nothing
+    model_dev = nothing
+    reclaim_device_memory!(device_cfg)
     return model, (train_losses = train_losses, val_losses = val_losses, best_val_loss = best_val_loss)
 end
 
@@ -347,6 +351,7 @@ function mine_hard_negatives(
         end
     end
 
+    reclaim_device_memory!(device_cfg)
     return DataFrame(w1 = w1_out, w2 = w2_out, label = lbl_out)
 end
 
@@ -552,6 +557,10 @@ function train_cross_encoder!(
 
     Flux.loadmodel!(model, best_state)
     Flux.testmode!(model)
+    best_state = nothing
+    opt_state = nothing
+    model_dev = nothing
+    reclaim_device_memory!(device_cfg)
     return model, (train_losses = train_losses, val_losses = val_losses, val_accs = val_accs, best_val_loss = best_val_loss)
 end
 
@@ -630,8 +639,8 @@ function load_artifacts(artifacts_dir::AbstractString; device_cfg::DeviceConfig 
 
     return AntonymPipeline(
         tok,
-        bi_model,
-        ce_model,
+        to_device(device_cfg, bi_model),
+        to_device(device_cfg, ce_model),
         Vector{String}(idx_data["vocab_words"]),
         Dict{String, String}(idx_data["reading_map"]),
         Matrix{Float32}(idx_data["vocab_k_embs"]),

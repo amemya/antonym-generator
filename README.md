@@ -116,13 +116,13 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
 ### 4.2 Windows (NVIDIA CUDA GPU / 本学習用)
 
-Windows GPU マシンでは、まず同様に `Pkg.instantiate()` を行い、加えて `CUDA.jl` を利用可能にします。
+Windows GPU マシンでは、まず同様に `Pkg.instantiate()` を行い、加えて `CUDA.jl` と `cuDNN.jl` を利用可能にします。
 
 #### 方法 A: プロジェクト環境へ追加する（手軽）
 
 ```powershell
 cd antonym-generator
-julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.add("CUDA"); using CUDA; CUDA.versioninfo()'
+julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.add(["CUDA", "cuDNN"]); using CUDA, cuDNN; CUDA.versioninfo()'
 ```
 
 #### 方法 B: グローバル環境へ追加する（`Project.toml` / `Manifest.toml` に差分を出さない）
@@ -130,10 +130,10 @@ julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.add("CUDA"); using CUDA;
 ```powershell
 cd antonym-generator
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
-julia -e 'using Pkg; Pkg.add("CUDA"); using CUDA; CUDA.versioninfo()'
+julia -e 'using Pkg; Pkg.add(["CUDA", "cuDNN"]); using CUDA, cuDNN; CUDA.versioninfo()'
 ```
 
-[src/device.jl](src/device.jl) は `--device auto` または `--device cuda` 指定時に `@eval import CUDA` で動的ロードするため、上記いずれの方法でも GPU を認識できます。
+[src/device.jl](src/device.jl) は `--device auto` または `--device cuda` 指定時に `Base.require` と `Base.invokelatest` を用いて `CUDA` / `cuDNN` を動的ロードし、`Flux.CUDADevice()` で直接 GPU 転送を行うため、上記いずれの方法でも GPU を認識できます（`cuDNN` を併用すると `NNlib` / `MLDataDevices` の cuDNN カーネルも有効になります）。
 
 ---
 
@@ -189,9 +189,12 @@ julia --project=. scripts/train_and_eval.jl \
   --top-k-stage1 100
 ```
 
-#### 実行例 2: Windows CUDA GPU (VRAM 20GB) での 12 層 BERT 本学習
+#### 実行例 2: Windows CUDA GPU での 12 層 BERT 本学習
 
 全データを使用し、12 層文字単位日本語 BERT（`kit-nlp/bert-base-japanese-char-v3-irony`）を学習する推奨コマンドです。
+
+- **8 GB VRAM 環境（例: RTX 3070 Ti）**: `--batch-size 64` を推奨（Stage 間の VRAM 回収は自動で行われます）
+- **20 GB VRAM 環境**: `--batch-size 128` での高速学習が可能
 
 ```powershell
 julia --project=. scripts/train_and_eval.jl `
@@ -199,7 +202,7 @@ julia --project=. scripts/train_and_eval.jl `
   --pretrained kit-nlp/bert-base-japanese-char-v3-irony `
   --epochs-stage1 15 `
   --epochs-stage2 8 `
-  --batch-size 128 `
+  --batch-size 64 `
   --top-k-stage1 200
 ```
 

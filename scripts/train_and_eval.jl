@@ -66,12 +66,16 @@ end
 
 function main()
     opts = parse_args(copy(ARGS))
+    device_cfg = resolve_device(Symbol(opts["device"]))
+    Base.invokelatest(_run_training, opts, device_cfg)
+end
+
+function _run_training(opts::Dict{String, Any}, device_cfg::DeviceConfig)
     project_root = dirname(@__DIR__)
     data_dir = something(opts["data_dir"], joinpath(project_root, "data", "processed"))
     artifacts_dir = something(opts["artifacts_dir"], joinpath(project_root, "artifacts"))
     pretrained_cache = joinpath(project_root, "data", "pretrained")
 
-    device_cfg = resolve_device(Symbol(opts["device"]))
     pretrained = String(opts["pretrained"])
 
     if !device_cfg.use_gpu && occursin("bert-base", pretrained)

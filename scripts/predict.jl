@@ -54,6 +54,15 @@ function main()
     isdir(artifacts_dir) || error("Artifacts directory not found: $artifacts_dir. Run scripts/train_and_eval.jl first.")
 
     device_cfg = resolve_device(Symbol(opts["device"]))
+    Base.invokelatest(_run_predict, artifacts_dir, opts, queries, device_cfg)
+end
+
+function _run_predict(
+    artifacts_dir::String,
+    opts::Dict{String, Any},
+    queries::Vector{String},
+    device_cfg::DeviceConfig,
+)
     pipeline = load_artifacts(artifacts_dir; device_cfg = device_cfg)
 
     for q in queries

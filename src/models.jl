@@ -111,16 +111,21 @@ function multi_positive_infonce_loss(
     hard_neg_weight::Float32 = 3.0f0,
 )
     S = (q_emb' * k_emb) ./ temperature
-    neg_only = hard_neg_mask .* (1.0f0 .- pos_mask)
-    log_w = log.(1.0f0 .+ (hard_neg_weight - 1.0f0) .* neg_only)
+    log_w, pos_bias, valid, denom_valid = Zygote.ChainRulesCore.ignore_derivatives() do
+        neg_only = hard_neg_mask .* (1.0f0 .- pos_mask)
+        lw = log.(1.0f0 .+ (hard_neg_weight - 1.0f0) .* neg_only)
+        pb = (1.0f0 .- pos_mask) .* (-1.0f4)
+        v = Float32.(sum(pos_mask; dims = 2) .> 0.5f0)
+        dv = max(sum(v), 1.0f0)
+        return lw, pb, v, dv
+    end
 
-    pos_logits = S .+ (1.0f0 .- pos_mask) .* (-1.0f4)
+    pos_logits = S .+ pos_bias
     log_num = NNlib.logsumexp(pos_logits; dims = 2)
     log_denom = NNlib.logsumexp(S .+ log_w; dims = 2)
 
-    valid = Float32.(sum(pos_mask; dims = 2) .> 0.5f0)
     row_loss = (log_denom .- log_num) .* valid
-    return sum(row_loss) / max(sum(valid), 1.0f0)
+    return sum(row_loss) / denom_valid
 end
 
 """
@@ -166,7 +171,7 @@ function (m::CrossEncoder)(
     pad_mask::AbstractMatrix{Float32},
 )
     B = size(token_ids, 2)
-    zeros_pf = Zygote.ignore() do
+    zeros_pf = Zygote.ChainRulesCore.ignore_derivatives() do
         z = zeros(Float32, m.pair_feat_dim, B)
         Flux.get_device(pad_mask)(z)
     end
@@ -187,7 +192,7 @@ function cross_encoder_loss(
     labels::AbstractVector{<:Integer};
     class_weights::Union{Nothing, AbstractVector{Float32}} = nothing,
 )
-    y_onehot, sample_w = Zygote.ignore() do
+    y_onehot, sample_w = Zygote.ChainRulesCore.ignore_derivatives() do
         dev = Flux.get_device(logits)
         cpu_labels = Array(labels)
         oh = Float32.(Flux.onehotbatch(cpu_labels, 1:3))

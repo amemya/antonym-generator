@@ -28,8 +28,8 @@ function AntonymPipeline(
 )
     return AntonymPipeline(
         tokenizer,
-        bi_encoder,
-        cross_encoder,
+        to_device(device_cfg, bi_encoder),
+        to_device(device_cfg, cross_encoder),
         vocab_words,
         reading_map,
         Matrix{Float32}(undef, 0, 0),

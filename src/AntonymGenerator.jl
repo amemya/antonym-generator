@@ -1,6 +1,6 @@
 module AntonymGenerator
 
-export DeviceConfig, resolve_device, to_device, cpu_device
+export DeviceConfig, resolve_device, to_device, cpu_device, reclaim_device_memory!
 export CharBertTokenizer, load_vocab, encode_single, encode_batch_single, encode_batch_pair
 export extract_pair_surface_features, extract_batch_surface_features
 export BertConfig, BertEmbeddings, BertSelfAttention, BertLayer, BertBackbone
