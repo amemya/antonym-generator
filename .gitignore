@@ -1,0 +1,26 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+*~
+*.swp
+.vscode/
+.idea/
+
+# Julia temporary / coverage / build artifacts
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+sysimage.so
+sysimage.dylib
+sysimage.dll
+
+# Heavy datasets & pretrained weights (auto-downloaded or placed locally; see README.md)
+data/raw/
+data/processed/
+data/pretrained/
+*.safetensors
+*.tar.xz
+
+# Trained checkpoints & precomputed Stage 1 index (generated locally; see README.md)
+artifacts/
+*.jld2
