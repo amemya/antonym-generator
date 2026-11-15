@@ -5,7 +5,7 @@ export CharBertTokenizer, load_vocab, encode_single, encode_batch_single, encode
 export extract_pair_surface_features, extract_batch_surface_features
 export BertConfig, BertEmbeddings, BertSelfAttention, BertLayer, BertBackbone
 export load_safetensors, load_pretrained_bert, mean_pool, char_embedding_pool
-export BiEncoder, CrossEncoder, encode_query, encode_candidate
+export BiEncoder, CrossEncoder, encode_query, encode_candidate, encode_query_and_candidate
 export multi_positive_infonce_loss, cross_encoder_loss, l2_normalize
 export LABEL_UNRELATED, LABEL_SYNONYM, LABEL_ANTONYM
 export is_clean_ja_word, to_hiragana, build_disjoint_splits, download_and_build_dataset, load_dataset_splits

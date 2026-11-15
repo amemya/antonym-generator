@@ -31,12 +31,12 @@ end
 
 BERT token, position, and token-type embeddings followed by LayerNorm and Dropout.
 """
-struct BertEmbeddings
-    word_embeddings::Flux.Embedding
-    position_embeddings::Flux.Embedding
-    token_type_embeddings::Flux.Embedding
-    norm::Flux.LayerNorm
-    dropout::Flux.Dropout
+struct BertEmbeddings{WE, PE, TE, LN, DO}
+    word_embeddings::WE
+    position_embeddings::PE
+    token_type_embeddings::TE
+    norm::LN
+    dropout::DO
 end
 Flux.@layer BertEmbeddings
 
@@ -64,14 +64,14 @@ end
 
 Multi-head self-attention block with output projection, residual connection, and LayerNorm.
 """
-struct BertSelfAttention
-    query::Flux.Dense
-    key::Flux.Dense
-    value::Flux.Dense
-    out_proj::Flux.Dense
-    attn_dropout::Flux.Dropout
-    resid_dropout::Flux.Dropout
-    norm::Flux.LayerNorm
+struct BertSelfAttention{Q, K, V, O, DO, LN}
+    query::Q
+    key::K
+    value::V
+    out_proj::O
+    attn_dropout::DO
+    resid_dropout::DO
+    norm::LN
     num_heads::Int
     head_dim::Int
 end
@@ -101,18 +101,20 @@ function (sa::BertSelfAttention)(x::AbstractArray{Float32, 3}, pad_mask::Abstrac
     dh = sa.head_dim
 
     q4 = permutedims(reshape(sa.query(x), dh, nh, S, B), (1, 3, 2, 4))
-    k4 = permutedims(reshape(sa.key(x), dh, nh, S, B), (1, 3, 2, 4))
+    kt4 = permutedims(reshape(sa.key(x), dh, nh, S, B), (3, 1, 2, 4))
     v4 = permutedims(reshape(sa.value(x), dh, nh, S, B), (1, 3, 2, 4))
 
     q = reshape(q4, dh, S, nh * B)
-    k = reshape(k4, dh, S, nh * B)
+    kt = reshape(kt4, S, dh, nh * B)
     v = reshape(v4, dh, S, nh * B)
 
     scale = 1.0f0 / sqrt(Float32(dh))
     # scores[k_pos, q_pos, head_batch]
-    scores = NNlib.batched_mul(NNlib.batched_transpose(k), q) .* scale
+    scores = NNlib.batched_mul(kt, q) .* scale
     scores4 = reshape(scores, S, S, nh, B)
-    key_bias = reshape((1.0f0 .- pad_mask) .* (-1.0f4), S, 1, 1, B)
+    key_bias = Zygote.ChainRulesCore.ignore_derivatives() do
+        reshape((1.0f0 .- pad_mask) .* (-1.0f4), S, 1, 1, B)
+    end
     masked_scores = reshape(scores4 .+ key_bias, S, S, nh * B)
 
     attn_probs = sa.attn_dropout(NNlib.softmax(masked_scores; dims = 1))
@@ -129,12 +131,12 @@ end
 
 Single BERT encoder layer: multi-head self-attention + GELU feed-forward network + residual LayerNorm.
 """
-struct BertLayer
-    attention::BertSelfAttention
-    intermediate::Flux.Dense
-    output::Flux.Dense
-    dropout::Flux.Dropout
-    norm::Flux.LayerNorm
+struct BertLayer{A, I, O, DO, LN}
+    attention::A
+    intermediate::I
+    output::O
+    dropout::DO
+    norm::LN
 end
 Flux.@layer BertLayer
 
@@ -161,9 +163,9 @@ end
 
 Full BERT encoder stack returning sequence hidden states and pooled representations.
 """
-struct BertBackbone
-    embeddings::BertEmbeddings
-    layers::Vector{BertLayer}
+struct BertBackbone{E, L}
+    embeddings::E
+    layers::Vector{L}
     config::BertConfig
 end
 Flux.@layer BertBackbone

@@ -18,12 +18,12 @@ end
 Dual-projection Bi-Encoder wrapping a shared `BertBackbone` with asymmetric `query_head`
 and `candidate_head` plus direct linear skip connections from `[mean_pool; char_pool]`.
 """
-struct BiEncoder
-    backbone::BertBackbone
-    query_head::Flux.Chain
-    query_skip::Flux.Dense
-    candidate_head::Flux.Chain
-    candidate_skip::Flux.Dense
+struct BiEncoder{BB, QH, QS, KH, KS}
+    backbone::BB
+    query_head::QH
+    query_skip::QS
+    candidate_head::KH
+    candidate_skip::KS
 end
 Flux.@layer BiEncoder
 
@@ -56,6 +56,9 @@ function _biencoder_repr(
     return vcat(pooled, char_p)
 end
 
+_project_query(model::BiEncoder, repr) = l2_normalize(model.query_head(repr) .+ model.query_skip(repr))
+_project_candidate(model::BiEncoder, repr) = l2_normalize(model.candidate_head(repr) .+ model.candidate_skip(repr))
+
 """
     encode_query(model::BiEncoder, token_ids, token_type_ids, pad_mask) -> Matrix{Float32}
 
@@ -68,8 +71,7 @@ function encode_query(
     pad_mask::AbstractMatrix{Float32},
 )
     repr = _biencoder_repr(model, token_ids, token_type_ids, pad_mask)
-    z = model.query_head(repr) .+ model.query_skip(repr)
-    return l2_normalize(z)
+    return _project_query(model, repr)
 end
 
 """
@@ -84,8 +86,32 @@ function encode_candidate(
     pad_mask::AbstractMatrix{Float32},
 )
     repr = _biencoder_repr(model, token_ids, token_type_ids, pad_mask)
-    z = model.candidate_head(repr) .+ model.candidate_skip(repr)
-    return l2_normalize(z)
+    return _project_candidate(model, repr)
+end
+
+"""
+    encode_query_and_candidate(
+        model::BiEncoder,
+        all_ids,
+        all_tids,
+        all_mask,
+        n_queries::Int,
+    ) -> Tuple{AbstractMatrix{Float32}, AbstractMatrix{Float32}}
+
+Run the shared BERT backbone once on concatenated `[queries; candidates]` inputs and project
+the two halves through the asymmetric query and candidate heads.
+"""
+function encode_query_and_candidate(
+    model::BiEncoder,
+    all_ids::AbstractMatrix{<:Integer},
+    all_tids::AbstractMatrix{<:Integer},
+    all_mask::AbstractMatrix{Float32},
+    n_queries::Int,
+)
+    repr = _biencoder_repr(model, all_ids, all_tids, all_mask)
+    q_repr = repr[:, 1:n_queries]
+    k_repr = repr[:, (n_queries + 1):end]
+    return _project_query(model, q_repr), _project_candidate(model, k_repr)
 end
 
 """
@@ -135,9 +161,9 @@ Pairwise Cross-Encoder taking `[CLS] w1 [SEP] w2 [SEP]` through a `BertBackbone`
 combining `[cls_pooled; mean_pooled; pair_features]` to output 3-class logits:
 `1: Unrelated`, `2: Synonym`, `3: Antonym`.
 """
-struct CrossEncoder
-    backbone::BertBackbone
-    classifier::Flux.Chain
+struct CrossEncoder{BB, C}
+    backbone::BB
+    classifier::C
     pair_feat_dim::Int
 end
 Flux.@layer CrossEncoder

@@ -72,6 +72,28 @@ function _prepare_bi_batch(
     return queries, cands, pos_mask, hard_neg_mask
 end
 
+function _bi_train_loss(
+    m::BiEncoder,
+    all_ids_d,
+    all_tids_d,
+    all_mask_d,
+    n_q::Int,
+    pos_d,
+    hneg_d,
+    temperature::Float32,
+    hard_neg_weight::Float32,
+)
+    q_emb, k_emb = encode_query_and_candidate(m, all_ids_d, all_tids_d, all_mask_d, n_q)
+    return multi_positive_infonce_loss(
+        q_emb,
+        k_emb,
+        pos_d,
+        hneg_d;
+        temperature = temperature,
+        hard_neg_weight = hard_neg_weight,
+    )
+end
+
 """
     train_bi_encoder!(
         model::BiEncoder,
@@ -140,12 +162,19 @@ function train_bi_encoder!(
     best_state = Flux.state(cpu_device(model_dev))
     train_losses = Float32[]
     val_losses = Float32[]
+    total_train_batches = cld(length(train_pairs), batch_size)
+
+    if device_cfg.use_gpu
+        println("  [Stage 1] Running on GPU ($total_train_batches batches/epoch). Batch 1 compiles GPU kernels (~30-60s)...")
+        flush(stdout); flush(stderr)
+    end
 
     for epoch in 1:epochs
         Flux.trainmode!(model_dev)
         perm = shuffle(rng, 1:length(train_pairs))
         epoch_loss = 0.0
         n_batches = 0
+        epoch_start_ns = time_ns()
 
         for start_idx in 1:batch_size:length(perm)
             end_idx = min(start_idx + batch_size - 1, length(perm))
@@ -157,33 +186,47 @@ function train_bi_encoder!(
                 rng,
             )
 
-            q_ids, q_tids, q_mask = encode_batch_single(tok, queries; max_len = max_len, dynamic_pad = true)
-            k_ids, k_tids, k_mask = encode_batch_single(tok, cands; max_len = max_len, dynamic_pad = true)
+            n_q = length(queries)
+            all_ids, all_tids, all_mask = encode_batch_single(
+                tok,
+                vcat(queries, cands);
+                max_len = max_len,
+                dynamic_pad = true,
+            )
 
-            q_ids_d = to_device(device_cfg, q_ids)
-            q_tids_d = to_device(device_cfg, q_tids)
-            q_mask_d = to_device(device_cfg, q_mask)
-            k_ids_d = to_device(device_cfg, k_ids)
-            k_tids_d = to_device(device_cfg, k_tids)
-            k_mask_d = to_device(device_cfg, k_mask)
+            all_ids_d = to_device(device_cfg, all_ids)
+            all_tids_d = to_device(device_cfg, all_tids)
+            all_mask_d = to_device(device_cfg, all_mask)
             pos_d = to_device(device_cfg, pos_mask)
             hneg_d = to_device(device_cfg, hard_neg_mask)
 
-            loss, grads = Zygote.withgradient(model_dev) do m
-                q_emb = encode_query(m, q_ids_d, q_tids_d, q_mask_d)
-                k_emb = encode_candidate(m, k_ids_d, k_tids_d, k_mask_d)
-                multi_positive_infonce_loss(
-                    q_emb,
-                    k_emb,
+            loss, grads = Zygote.withgradient(
+                m -> _bi_train_loss(
+                    m,
+                    all_ids_d,
+                    all_tids_d,
+                    all_mask_d,
+                    n_q,
                     pos_d,
-                    hneg_d;
-                    temperature = temperature,
-                    hard_neg_weight = hard_neg_weight,
-                )
-            end
+                    hneg_d,
+                    temperature,
+                    hard_neg_weight,
+                ),
+                model_dev,
+            )
             opt_state, model_dev = Optimisers.update!(opt_state, model_dev, grads[1])
             epoch_loss += Float64(loss)
             n_batches += 1
+
+            if n_batches == 1 || n_batches % 50 == 0 || n_batches == total_train_batches
+                elapsed_s = (time_ns() - epoch_start_ns) / 1.0e9
+                ms_per_batch = round(1000.0 * elapsed_s / n_batches; digits = 1)
+                println("  [Stage 1 Epoch $epoch/$epochs] Batch $n_batches/$total_train_batches | loss=$(round(Float64(loss); digits=4)) | $(ms_per_batch) ms/batch ($(round(elapsed_s; digits=1))s elapsed)")
+                flush(stdout); flush(stderr)
+            end
+            if device_cfg.use_gpu && n_batches % 20 == 0
+                GC.gc(false)
+            end
         end
 
         mean_train = Float32(epoch_loss / max(n_batches, 1))
@@ -204,17 +247,18 @@ function train_bi_encoder!(
                     val_syn_map,
                     MersenneTwister(seed + v_batches),
                 )
-                q_ids, q_tids, q_mask = encode_batch_single(tok, queries; max_len = max_len, dynamic_pad = true)
-                k_ids, k_tids, k_mask = encode_batch_single(tok, cands; max_len = max_len, dynamic_pad = true)
-                q_emb = encode_query(model_dev, to_device(device_cfg, q_ids), to_device(device_cfg, q_tids), to_device(device_cfg, q_mask))
-                k_emb = encode_candidate(model_dev, to_device(device_cfg, k_ids), to_device(device_cfg, k_tids), to_device(device_cfg, k_mask))
-                l = multi_positive_infonce_loss(
-                    q_emb,
-                    k_emb,
+                n_q = length(queries)
+                all_ids, all_tids, all_mask = encode_batch_single(tok, vcat(queries, cands); max_len = max_len, dynamic_pad = true)
+                l = _bi_train_loss(
+                    model_dev,
+                    to_device(device_cfg, all_ids),
+                    to_device(device_cfg, all_tids),
+                    to_device(device_cfg, all_mask),
+                    n_q,
                     to_device(device_cfg, pos_mask),
-                    to_device(device_cfg, hard_neg_mask);
-                    temperature = temperature,
-                    hard_neg_weight = hard_neg_weight,
+                    to_device(device_cfg, hard_neg_mask),
+                    temperature,
+                    hard_neg_weight,
                 )
                 v_loss += Float64(l)
                 v_batches += 1
@@ -229,6 +273,7 @@ function train_bi_encoder!(
         end
 
         @info "Stage 1 Bi-Encoder Epoch $epoch/$epochs" train_loss=round(mean_train; digits=4) val_loss=round(mean_val; digits=4)
+        reclaim_device_memory!(device_cfg)
     end
 
     Flux.loadmodel!(model, best_state)
@@ -397,6 +442,19 @@ Train the 3-class `CrossEncoder` (`Unrelated`, `Synonym`, `Antonym`) combining t
 pair encoding, lexical surface features, and Stage 1 Bi-Encoder scores.
 Updates `model` with the best validation checkpoint and returns `(model, history)`.
 """
+function _ce_train_loss(
+    m::CrossEncoder,
+    ids_d,
+    tids_d,
+    mask_d,
+    pf_d,
+    by,
+    class_weights,
+)
+    logits = m(ids_d, tids_d, mask_d, pf_d)
+    return cross_encoder_loss(logits, by; class_weights = class_weights)
+end
+
 function train_cross_encoder!(
     model::CrossEncoder,
     bi_model::BiEncoder,
@@ -476,12 +534,19 @@ function train_cross_encoder!(
     train_losses = Float32[]
     val_losses = Float32[]
     val_accs = Float32[]
+    total_train_batches = cld(length(train_y), batch_size)
+
+    if device_cfg.use_gpu
+        println("  [Stage 2] Running on GPU ($total_train_batches batches/epoch). Batch 1 compiles GPU kernels...")
+        flush(stdout); flush(stderr)
+    end
 
     for epoch in 1:epochs
         Flux.trainmode!(model_dev)
         perm = shuffle(rng, 1:length(train_y))
         epoch_loss = 0.0
         n_batches = 0
+        epoch_start_ns = time_ns()
 
         for start_idx in 1:batch_size:length(perm)
             end_idx = min(start_idx + batch_size - 1, length(perm))
@@ -498,13 +563,23 @@ function train_cross_encoder!(
             mask_d = to_device(device_cfg, mask)
             pf_d = to_device(device_cfg, pf)
 
-            loss, grads = Zygote.withgradient(model_dev) do m
-                logits = m(ids_d, tids_d, mask_d, pf_d)
-                cross_encoder_loss(logits, by; class_weights = class_weights)
-            end
+            loss, grads = Zygote.withgradient(
+                m -> _ce_train_loss(m, ids_d, tids_d, mask_d, pf_d, by, class_weights),
+                model_dev,
+            )
             opt_state, model_dev = Optimisers.update!(opt_state, model_dev, grads[1])
             epoch_loss += Float64(loss)
             n_batches += 1
+
+            if n_batches == 1 || n_batches % 100 == 0 || n_batches == total_train_batches
+                elapsed_s = (time_ns() - epoch_start_ns) / 1.0e9
+                ms_per_batch = round(1000.0 * elapsed_s / n_batches; digits = 1)
+                println("  [Stage 2 Epoch $epoch/$epochs] Batch $n_batches/$total_train_batches | loss=$(round(Float64(loss); digits=4)) | $(ms_per_batch) ms/batch ($(round(elapsed_s; digits=1))s elapsed)")
+                flush(stdout); flush(stderr)
+            end
+            if device_cfg.use_gpu && n_batches % 25 == 0
+                GC.gc(false)
+            end
         end
 
         mean_train = Float32(epoch_loss / max(n_batches, 1))
@@ -553,6 +628,7 @@ function train_cross_encoder!(
         end
 
         @info "Stage 2 Cross-Encoder Epoch $epoch/$epochs" train_loss=round(mean_train; digits=4) val_loss=round(mean_val; digits=4) val_acc=round(val_acc; digits=4)
+        reclaim_device_memory!(device_cfg)
     end
 
     Flux.loadmodel!(model, best_state)

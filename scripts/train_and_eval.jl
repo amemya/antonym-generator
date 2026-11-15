@@ -93,11 +93,8 @@ function _run_training(opts::Dict{String, Any}, device_cfg::DeviceConfig)
 
     @info "Loading pretrained BERT backbone for Stage 1 Bi-Encoder..." repo=pretrained
     bi_backbone, tok, cfg = load_pretrained_bert(pretrained; cache_dir = pretrained_cache, num_layers = opts["num_layers"])
-    @info "Loading pretrained BERT backbone for Stage 2 Cross-Encoder..." repo=pretrained
-    ce_backbone, _, _ = load_pretrained_bert(pretrained; cache_dir = pretrained_cache, num_layers = opts["num_layers"])
 
     bi_model = BiEncoder(bi_backbone; proj_dim = opts["proj_dim"])
-    ce_model = CrossEncoder(ce_backbone; pair_feat_dim = 10)
 
     println("\n=== Training Stage 1: Bi-Encoder (Multi-positive InfoNCE) ===")
     bi_model, bi_hist = train_bi_encoder!(
@@ -129,6 +126,10 @@ function _run_training(opts::Dict{String, Any}, device_cfg::DeviceConfig)
     n_syn_hn = count(==(LABEL_SYNONYM), hard_neg_df.label)
     n_unrel_hn = count(==(LABEL_UNRELATED), hard_neg_df.label)
     println("Mined hard negatives: total=", nrow(hard_neg_df), " (synonym=", n_syn_hn, ", unrelated=", n_unrel_hn, ")")
+
+    @info "Loading pretrained BERT backbone for Stage 2 Cross-Encoder..." repo=pretrained
+    ce_backbone, _, _ = load_pretrained_bert(pretrained; cache_dir = pretrained_cache, num_layers = opts["num_layers"])
+    ce_model = CrossEncoder(ce_backbone; pair_feat_dim = 10)
 
     println("\n=== Training Stage 2: Cross-Encoder (3-class Classification) ===")
     ce_model, ce_hist = train_cross_encoder!(
